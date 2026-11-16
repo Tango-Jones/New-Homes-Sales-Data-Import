@@ -1,6 +1,6 @@
-# Ryness Weekly Import
+# New Homes Sales Data Weekly Import
 
-Reads the weekly SoCal Ryness Report PDF and updates `New_Home_Sales_Database.xlsx`:
+Reads the weekly New Home Sales Report PDF and updates `New_Home_Sales_Database.xlsx`:
 **Gross Sales** (Wk's Sales), **Cancellations** (Wk's Cans) and **Net Sales** (Gross - Cancellations, live formulas).
 Net Sales also carries Project Label, Pace Label (`46 of 79 sold | 0.00/wk (4 wk) | 0.23/wk (13 wk) | 0.52/wk (LOJ)`)
 and LOJ Pace (life-of-job: average of all weekly net sales).
