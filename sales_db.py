@@ -21,24 +21,28 @@ from datetime import datetime, timedelta, date
 
 import pandas as pd
 
-COMM_COLS = ["community_id", "market", "county_group", "submarket", "community", "builder",
+COMM_COLS = ["community_id", "market", "county_group", "submarket", "community", "project_label", "builder",
              "city", "product_type", "units", "sold_to_date", "remaining", "total_lots",
              "grand_opening", "tracking", "status", "first_week", "last_reported", "weeks_off_report",
              "ryness_flag", "legacy_name", "legacy_group", "m_ord", "s_ord", "r_ord",
-             "last_pdf_week", "user_notes"]
+             "last_pdf_week", "user_notes", "gpn_name", "project_label_saved"]
 WEEK_COLS = ["week_ending", "community_id", "market", "gross_sales", "cancellations",
              "net_sales", "report_flag", "ryness_notes", "units", "sold_to_date",
              "source", "legacy_text", "source_file"]
 MAP_COLS = ["alias", "market", "community_id"]
 LOG_COLS = ["imported_at", "week_ending", "source_file", "markets", "communities_parsed",
-            "gross_sales", "cancellations", "net_sales", "new", "added", "dropped",
+            "gross_sales", "cancellations", "net_sales", "not_reported", "new", "added", "dropped",
             "returned", "totals_check", "warnings"]
 CHG_COLS = ["week_ending", "market", "submarket", "community", "builder", "event", "detail",
             "community_id"]
 
 SRC_PDF, SRC_OFF, SRC_LEGACY = "Ryness PDF", "Not on report", "Legacy v4 (net only)"
 SRC_MANUAL = "Manual entry"
-USER_FIELDS = ["total_lots", "grand_opening", "tracking", "user_notes"]
+SRC_GPN = "GPN report"                                   # Great Park Neighborhoods report
+SRC_SUPERSEDED = "Ryness PDF (superseded by GPN)"        # kept for audit, not shown or counted
+PDF_SOURCES = (SRC_PDF, SRC_SUPERSEDED)
+NOT_REPORTED = "N/R"      # listed on the Ryness report but Traffic N/A (didn't report that week)
+USER_FIELDS = ["project_label", "total_lots", "grand_opening", "tracking", "user_notes"]
 MANUAL_COLS = ["week_ending", "community_id", "gross_sales", "cancellations", "note"]
 
 
@@ -129,6 +133,7 @@ def load_db(path) -> dict:
             df = df.rename(columns=_HEADER_TO_COL).reindex(columns=cols)
             df = df.dropna(how="all")
             db[key] = df
+    _reconcile_labels(db, path, xl)
     for key, sheet in (("legacy_report", "Legacy_Match"), ("legacy_compare", "Legacy_Check")):
         if sheet in xl.sheet_names:
             db[key] = pd.read_excel(xl, sheet, dtype=object)
@@ -139,6 +144,57 @@ def load_db(path) -> dict:
             w[col] = pd.to_numeric(w[col], errors="coerce")
     finalize(db)
     return db
+
+
+def _clean(v) -> str:
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return ""
+    return str(v).strip()
+
+
+def _reconcile_labels(db, path, xl):
+    """Project Label can be typed in the Net Sales tab or the Communities tab.
+    Whichever one changed since the last save wins (Net Sales if both did)."""
+    c = db["communities"]
+    if c.empty:
+        return
+    ns = {}
+    if "Net Sales" in xl.sheet_names:
+        grid = pd.read_excel(xl, "Net Sales", header=3, dtype=object)
+        if "Project Label" in grid.columns:
+            key = {}
+            for r in c.itertuples():
+                key.setdefault((_clean(r.community), _clean(r.builder), _clean(r.city)), []).append(r.community_id)
+            for r in grid[["Community", "Builder", "City", "Project Label"]].itertuples(index=False):
+                ids = key.get((_clean(r[0]), _clean(r[1]), _clean(r[2])))
+                if ids and len(ids) == 1:
+                    ns[ids[0]] = _clean(r[3])
+    has_saved = c["project_label_saved"].notna().any() or "Label (last saved)" in         pd.read_excel(xl, "Communities", header=2, nrows=0).columns if "Communities" in xl.sheet_names else False
+    out = []
+    for r in c.itertuples():
+        cm, sv = _clean(r.project_label), _clean(r.project_label_saved)
+        if r.community_id in ns:
+            nv = ns[r.community_id]
+            if not has_saved:
+                out.append(nv or cm)
+            elif nv != sv:
+                out.append(nv)
+            elif cm != sv:
+                out.append(cm)
+            else:
+                out.append(sv)
+        else:
+            out.append(cm)
+    c["project_label"] = [v or None for v in out]
+    db["communities"] = c
+
+
+def set_project_labels(db, labels: dict):
+    """labels: {community_id: label or ''}. Used by the app's label editor."""
+    c = db["communities"]
+    for cid, v in labels.items():
+        c.loc[c["community_id"] == cid, "project_label"] = (_clean(v) or None)
+    db["communities"] = c
 
 
 # --------------------------------------------------------------------------- import
@@ -201,7 +257,8 @@ def import_report(db: dict, parsed, source_file: str = "") -> dict:
                           "net_sales": r.net_sales, "report_flag": r.status_flag,
                           "ryness_notes": r.notes, "units": r.units,
                           "sold_to_date": r.sold_to_date, "source": SRC_PDF,
-                          "legacy_text": None, "source_file": source_file})
+                          "legacy_text": None if r.reported else NOT_REPORTED,
+                          "source_file": source_file})
 
     if new_rows:
         comm = pd.concat([comm, pd.DataFrame(new_rows).reindex(columns=COMM_COLS)], ignore_index=True)
@@ -217,8 +274,9 @@ def import_report(db: dict, parsed, source_file: str = "") -> dict:
     # Replace this week's rows for every community in the markets covered by this PDF
     w = db["weekly"]
     mk_ids = set(db["communities"].loc[db["communities"]["market"].isin(markets), "community_id"])
-    keep = ~((w["week_ending"] == week) & (w["community_id"].isin(mk_ids)))
-    replaced = int((~keep & (w["source"] == SRC_PDF)).sum())
+    keep = ~((w["week_ending"] == week) & (w["community_id"].isin(mk_ids)) &
+             w["source"].isin([SRC_PDF, SRC_OFF, SRC_SUPERSEDED]))
+    replaced = int((~keep & w["source"].isin(PDF_SOURCES)).sum())
     db["weekly"] = pd.concat([w[keep], pd.DataFrame(week_rows)], ignore_index=True)
 
     # Drop orphan communities (e.g. created under a name later mapped via Name_Map)
@@ -242,6 +300,7 @@ def import_report(db: dict, parsed, source_file: str = "") -> dict:
         "source_file": source_file, "markets": ", ".join(markets),
         "communities_parsed": len(df), "gross_sales": int(df.gross_sales.sum()),
         "cancellations": int(df.cancellations.sum()), "net_sales": int(df.net_sales.sum()),
+        "not_reported": int((~df["reported"]).sum()),
         "new": int((wk["event"] == "NEW").sum()), "added": int((wk["event"] == "ADDED").sum()),
         "dropped": int((wk["event"] == "DROPPED").sum()),
         "returned": int((wk["event"] == "RETURNED").sum()),
@@ -253,9 +312,143 @@ def import_report(db: dict, parsed, source_file: str = "") -> dict:
     return summary
 
 
+# --------------------------------------------------------------------------- GPN
+GPN_MARKET = ("LA-Orange-North", "Central-North Orange", "Central Orange", "Irvine")
+
+
+def _gpn_park(neighborhood: str) -> str:
+    n = neighborhood.lower()
+    return "Luna Park" if "luna" in n else "Great Park"
+
+
+def match_gpn(db, rec):
+    """Return (community_id or None, method). GPN prints 'Builder, Collection' (e.g. 'KB, Moonlight');
+    the database usually has 'Moonlight at Luna Park'."""
+    c = db["communities"]
+    nm = db["name_map"]
+    key = norm_name(rec.gpn_name)
+    if len(nm):
+        hit = nm[nm["alias"].map(norm_name) == key]
+        if len(hit):
+            return hit.iloc[0]["community_id"], "Name_Map"
+    if "gpn_name" in c:
+        hit = c[c["gpn_name"].map(norm_name) == key]
+        if len(hit) == 1:
+            return hit.iloc[0]["community_id"], "matched before"
+    pool = c[(c["market"] == GPN_MARKET[0]) & c["builder"].map(lambda b: builder_match(b, rec.builder))]
+    nc = norm_name(rec.collection)
+    park = norm_name(_gpn_park(rec.neighborhood))
+    exact = pool[pool["community"].map(norm_name).isin([nc, f"{nc} at {park}"])]
+    if len(exact) == 1:
+        return exact.iloc[0]["community_id"], "name + builder"
+    pref = pool[pool["community"].map(lambda x: norm_name(x).startswith(nc + " "))]
+    if len(pref) > 1:
+        pref = pref[pref["community"].map(lambda x: park in norm_name(x))]
+    if len(pref) == 1:
+        return pref.iloc[0]["community_id"], "name + builder"
+    if len(pref) > 1:
+        return None, f"ambiguous ({', '.join(pref['community'])}) - add a Name_Map row"
+    return None, "no match"
+
+
+def import_gpn(db, parsed, source_file: str = "") -> dict:
+    """Merge one GPN report. Its numbers supersede Ryness for the same community and
+    week, and fill in projects Ryness doesn't cover. Re-importing a week replaces it."""
+    week = parsed.week_ending
+    if week is None or not parsed.records:
+        raise ValueError("No collections / week-ending date found in the GPN report.")
+    c = db["communities"]
+    existing = set(c["community_id"])
+    rows, matches, new_c = [], [], []
+    for rec in parsed.records:
+        cid, how = match_gpn(db, rec)
+        sold_out = rec.sold_out is not None and rec.sold_out <= week
+        quiet = rec.gross_sales == 0 and rec.cancellations == 0
+        if cid is None:
+            if sold_out and quiet:
+                matches.append({"gpn_name": rec.gpn_name, "neighborhood": rec.neighborhood,
+                                "community": None, "community_id": None,
+                                "match": "skipped - sold out before this week, not in database"})
+                continue
+            if how.startswith("ambiguous"):
+                matches.append({"gpn_name": rec.gpn_name, "neighborhood": rec.neighborhood,
+                                "community": None, "community_id": None, "match": how})
+                continue
+            name = f"{rec.collection} at {_gpn_park(rec.neighborhood)}"
+            cid = make_id(GPN_MARKET[0], name, rec.builder, existing)
+            existing.add(cid)
+            new_c.append({"community_id": cid, "market": GPN_MARKET[0], "county_group": GPN_MARKET[1],
+                          "submarket": GPN_MARKET[2], "community": name, "builder": rec.builder,
+                          "city": GPN_MARKET[3], "product_type": rec.product_type, "units": rec.units,
+                          "sold_to_date": rec.sold, "tracking": "GPN", "gpn_name": rec.gpn_name,
+                          "grand_opening": rec.opening, "m_ord": 0, "s_ord": 0, "r_ord": 9000})
+            how = "new community (GPN only)"
+        matches.append({"gpn_name": rec.gpn_name, "neighborhood": rec.neighborhood,
+                        "community": c.loc[c["community_id"] == cid, "community"].iloc[0]
+                        if cid in set(c["community_id"]) else new_c[-1]["community"],
+                        "community_id": cid, "match": how})
+        rows.append({"week_ending": week, "community_id": cid, "market": GPN_MARKET[0],
+                     "gross_sales": None if (sold_out and quiet) else rec.gross_sales,
+                     "cancellations": None if (sold_out and quiet) else rec.cancellations,
+                     "net_sales": None if (sold_out and quiet) else rec.net_sales,
+                     "report_flag": "S/O" if rec.models_open == "S/O" else "",
+                     "ryness_notes": rec.gpn_name, "units": rec.units, "sold_to_date": rec.sold,
+                     "source": SRC_GPN, "legacy_text": "SOLD OUT" if (sold_out and quiet) else None,
+                     "source_file": source_file})
+    if new_c:
+        c = pd.concat([c, pd.DataFrame(new_c).reindex(columns=COMM_COLS)], ignore_index=True)
+    # remember the GPN name; GPN is the source for communities Ryness doesn't carry
+    c["gpn_name"] = c["gpn_name"].astype(object)
+    c["tracking"] = c["tracking"].astype(object)
+    for m in matches:
+        if m["community_id"] is None:
+            continue
+        i = c.index[c["community_id"] == m["community_id"]][0]
+        c.at[i, "gpn_name"] = m["gpn_name"]
+        if str(c.at[i, "tracking"]).lower().startswith("manual"):
+            c.at[i, "tracking"] = "GPN"
+    db["communities"] = c
+
+    # Ryness numbers for the same week, to show what GPN overrides
+    w = db["weekly"]
+    ry = w[(w["week_ending"] == week) & w["source"].isin(PDF_SOURCES)].set_index("community_id")
+    overrides = []
+    for r in rows:
+        if r["community_id"] in ry.index and r["net_sales"] is not None:
+            rr = ry.loc[r["community_id"]]
+            rr = rr.iloc[0] if isinstance(rr, pd.DataFrame) else rr
+            if (rr["gross_sales"], rr["cancellations"]) != (r["gross_sales"], r["cancellations"]):
+                overrides.append({"community": next(m["community"] for m in matches if m["community_id"] == r["community_id"]),
+                                  "ryness_gross": rr["gross_sales"], "ryness_cans": rr["cancellations"],
+                                  "gpn_gross": r["gross_sales"], "gpn_cans": r["cancellations"]})
+
+    keep = ~((w["week_ending"] == week) & (w["source"] == SRC_GPN))
+    replaced = int((~keep).sum())
+    db["weekly"] = pd.concat([w[keep], pd.DataFrame(rows, columns=WEEK_COLS)], ignore_index=True)
+    finalize(db)
+
+    bad = [x for x in parsed.section_checks if not x["ok"]]
+    summary = {"imported_at": datetime.now().strftime("%Y-%m-%d %H:%M"), "week_ending": week,
+               "source_file": source_file, "markets": "GPN (Great Park, Irvine)",
+               "communities_parsed": len(parsed.records),
+               "gross_sales": sum(r.gross_sales for r in parsed.records),
+               "cancellations": sum(r.cancellations for r in parsed.records),
+               "net_sales": sum(r.net_sales for r in parsed.records),
+               "new": len(new_c),
+               "totals_check": f"{len(parsed.section_checks) - len(bad)}/{len(parsed.section_checks)} neighborhoods match GPN totals",
+               "warnings": "; ".join(parsed.warnings + ([f"Replaced {replaced} previously imported GPN rows"] if replaced else [])
+                                     + ([f"GPN overrides Ryness for {len(overrides)} project(s)"] if overrides else []))}
+    db["import_log"] = pd.concat([db["import_log"], pd.DataFrame([summary])], ignore_index=True)
+    summary["matches"] = pd.DataFrame(matches)
+    summary["overrides"] = pd.DataFrame(overrides)
+    return summary
+
+
 # --------------------------------------------------------------------------- derive
 def _present(w):
-    return w["net_sales"].notna() & w["source"].isin([SRC_PDF, SRC_LEGACY, SRC_MANUAL])
+    """On the report that week: numbers recorded, or listed as not reporting (N/R)."""
+    return (w["net_sales"].notna() & w["source"].isin([SRC_PDF, SRC_LEGACY, SRC_MANUAL, SRC_GPN])) | \
+        ((w["source"] == SRC_PDF) & (w["legacy_text"] == NOT_REPORTED))
 
 
 def _manual_rows(db, existing_pdf_keys):
@@ -281,7 +474,15 @@ def finalize(db):
     w = db["weekly"]
     w = w[~w["source"].isin([SRC_OFF, SRC_MANUAL])].copy()
     w["week_ending"] = pd.to_datetime(w["week_ending"]).dt.date
-    pdf_keys_cw = set(zip(w.loc[w["source"] == SRC_PDF, "community_id"], w.loc[w["source"] == SRC_PDF, "week_ending"]))
+    # GPN supersedes Ryness for the same community + week (Ryness row kept for audit)
+    gpn_keys = set(zip(w.loc[w["source"] == SRC_GPN, "community_id"], w.loc[w["source"] == SRC_GPN, "week_ending"]))
+    is_pdf = w["source"].isin(PDF_SOURCES)
+    sup = pd.Series([k in gpn_keys for k in zip(w["community_id"], w["week_ending"])], index=w.index, dtype=bool)
+    w.loc[is_pdf & sup, "source"] = SRC_SUPERSEDED
+    w.loc[is_pdf & ~sup, "source"] = SRC_PDF
+    w = w[~((w["source"] == SRC_LEGACY) & sup)]          # GPN also replaces v4 legacy numbers
+    is_pdf = w["source"].isin(PDF_SOURCES)
+    pdf_keys_cw = set(zip(w.loc[is_pdf, "community_id"], w.loc[is_pdf, "week_ending"])) | gpn_keys
     mrows = _manual_rows(db, pdf_keys_cw)
     if len(mrows):
         w = pd.concat([w, mrows], ignore_index=True)
@@ -289,14 +490,26 @@ def finalize(db):
         w[col] = pd.to_numeric(w[col], errors="coerce")
     comm["tracking"] = comm["tracking"].fillna("Ryness").replace("", "Ryness")
     cmap = comm.set_index("community_id")
-    manual_ids = set(cmap.index[cmap["tracking"].astype(str).str.lower().str.startswith("manual")])
+    trk = cmap["tracking"].astype(str).str.lower()
+    manual_ids = set(cmap.index[trk.str.startswith("manual") | trk.str.startswith("gpn")])
+    gpn_tracked = set(cmap.index[trk.str.startswith("gpn")])
+
+    # Ryness weeks supersede v4 legacy rows for the same market/week (except for
+    # communities tracked outside Ryness). Done first so legacy entries in those
+    # weeks can't make a project look "on the report" before Ryness listed it.
+    pdf_any = w[w["source"].isin(PDF_SOURCES)]
+    pdf_keys = set(zip(pdf_any["week_ending"], pdf_any["market"]))
+    w["_mkt"] = w["community_id"].map(cmap["market"])
+    drop_legacy = (w["source"] == SRC_LEGACY) & ~w["community_id"].isin(manual_ids) & \
+        pd.Series([k in pdf_keys for k in zip(w["week_ending"], w["_mkt"])], index=w.index, dtype=bool)
+    w = w[~drop_legacy].drop(columns="_mkt")
 
     pres = w[_present(w)]
     first_present = pres.groupby("community_id")["week_ending"].min()
 
     # 1) Not-on-report rows: every PDF week, every community in that market that
     #    had already appeared before that week but isn't in the PDF.
-    pdf = w[w["source"] == SRC_PDF]
+    pdf = w[w["source"].isin(PDF_SOURCES)]
     so_txt = w[w["legacy_text"].astype(str).str.upper().str.strip() == "SOLD OUT"]
     first_so = so_txt.groupby("community_id")["week_ending"].min()
     off_rows = []
@@ -304,18 +517,12 @@ def finalize(db):
         listed = set(g["community_id"])
         ids = cmap.index[cmap["market"] == mkt]
         for cid in ids:
-            if cid in listed or cid in manual_ids:
+            if cid in listed or cid in manual_ids or (cid, wk) in gpn_keys:
                 continue
             fp, fs = first_present.get(cid), first_so.get(cid)
             if (fp is not None and fp < wk) or (fs is not None and fs < wk):
                 off_rows.append({"week_ending": wk, "community_id": cid, "market": mkt,
                                  "source": SRC_OFF, "legacy_text": "SOLD OUT"})
-    # PDF weeks supersede legacy rows for the same market/week
-    pdf_keys = set(zip(pdf["week_ending"], pdf["market"]))
-    w["_mkt"] = w["community_id"].map(cmap["market"])
-    drop_legacy = (w["source"] == SRC_LEGACY) & ~w["community_id"].isin(manual_ids) & \
-        pd.Series([k in pdf_keys for k in zip(w["week_ending"], w["_mkt"])], index=w.index, dtype=bool)
-    w = w[~drop_legacy].drop(columns="_mkt")
     w = pd.concat([w, pd.DataFrame(off_rows, columns=WEEK_COLS)], ignore_index=True)
     w["market"] = w["community_id"].map(cmap["market"]).fillna(w["market"])
     w = w.sort_values(["week_ending", "community_id"]).reset_index(drop=True)
@@ -326,9 +533,9 @@ def finalize(db):
     #    legacy/manual row. Weeks can be imported in any order (older reports
     #    backfill cleanly) and partial legacy coverage never creates false flags.
     pres = w[_present(w)]
-    pdf_rows = w[w["source"] == SRC_PDF]
+    pdf_rows = w[w["source"].isin(PDF_SOURCES)]
     pdf_weeks_by_mkt = pdf_rows.groupby("market")["week_ending"].agg(lambda x: set(x)).to_dict()
-    other_cov = (w[w["source"].isin([SRC_LEGACY, SRC_MANUAL])]
+    other_cov = (w[w["source"].isin([SRC_LEGACY, SRC_MANUAL, SRC_GPN])]
                  .groupby("community_id")["week_ending"].agg(lambda x: set(x)).to_dict())
     present_wks = pres.groupby("community_id")["week_ending"].agg(lambda x: set(x)).to_dict()
     flag_at = {(r.community_id, r.week_ending): (r.report_flag if isinstance(r.report_flag, str) else "")
@@ -418,7 +625,11 @@ def finalize(db):
         L = cov[-1] if cov else None
         firsts.append(fp)
         lasts.append(lp)
-        if cid in manual_ids:
+        if cid in gpn_tracked:
+            sold_out_gpn = lp is None or (cov and lp < cov[-1])
+            statuses.append("SOLD OUT" if sold_out_gpn else "GPN (not on Ryness)")
+            offs.append(None)
+        elif cid in manual_ids:
             statuses.append("MANUAL (not on Ryness)")
             offs.append(None)
         elif lp is None:
@@ -626,6 +837,8 @@ _COL_TO_HEADER = {
     "legacy_name": "Legacy Name (v4)", "legacy_group": "Legacy Group (v4)",
     "m_ord": "m_ord", "s_ord": "s_ord", "r_ord": "r_ord", "last_pdf_week": "Last PDF Week",
     "user_notes": "My Notes", "alias": "Alias (name as printed)",
+    "project_label": "Project Label", "project_label_saved": "Label (last saved)",
+    "gpn_name": "GPN Name",
 }
 _HEADER_TO_COL = {v: k for k, v in _COL_TO_HEADER.items()}
 _HEADER_TO_COL.update({"Week Ending": "week_ending", "Gross Sales": "gross_sales",

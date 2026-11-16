@@ -54,6 +54,7 @@ class Record:
     net_sales: int = 0
     sold_to_date: int | None = None
     source_page: int = 0
+    reported: bool = True          # False when Ryness shows Traffic "N/A" (listed, didn't report)
 
 
 @dataclass
@@ -61,6 +62,7 @@ class ParseResult:
     week_ending: date | None
     records: list[Record] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
     section_checks: list[dict] = field(default_factory=list)
 
     def to_frame(self):
@@ -163,7 +165,8 @@ def parse_pdf(path) -> ParseResult:
                     sm = re.sub(r"\s+Sold.*$", "", sm)
                     if section is None or (cg, sm) != (section["county_group"], section["submarket"]):
                         section = {"market": market, "county_group": cg, "submarket": sm,
-                                   "rows": 0, "sales": 0, "cans": 0, "page": pno}
+                                   "rows": 0, "listed": 0, "not_reported": [],
+                                   "sales": 0, "cans": 0, "page": pno}
                     county_group, submarket = cg, sm
                     continue
 
@@ -186,9 +189,13 @@ def parse_pdf(path) -> ParseResult:
                                "reporting_parsed": section["rows"],
                                "sales_pdf": tot.get("gross_sales"), "sales_parsed": section["sales"],
                                "cans_pdf": tot.get("cancellations"), "cans_parsed": section["cans"]}
+                        # "No. Reporting" excludes listed projects whose Traffic is N/A
+                        # (they didn't report that week); we count the same way.
+                        chk["listed"] = section["listed"]
                         chk["ok"] = (chk["reporting_pdf"] == chk["reporting_parsed"]
                                      and chk["sales_pdf"] == chk["sales_parsed"]
                                      and chk["cans_pdf"] == chk["cans_parsed"])
+                        chk["rows_vs_reporting"] = (chk["reporting_parsed"] or 0) - (chk["reporting_pdf"] or 0)
                         result.section_checks.append(chk)
                         if not chk["ok"]:
                             result.warnings.append(
@@ -196,6 +203,10 @@ def parse_pdf(path) -> ParseResult:
                                 f"reporting {chk['reporting_parsed']}/{chk['reporting_pdf']}, "
                                 f"sales {chk['sales_parsed']}/{chk['sales_pdf']}, "
                                 f"cans {chk['cans_parsed']}/{chk['cans_pdf']}")
+                        if section["not_reported"]:
+                            result.notes.append(
+                                f"{chk['submarket']} (p{pno}): did not report (Traffic N/A) - "
+                                + ", ".join(section["not_reported"]))
                     continue
 
                 if first == "City" and len(line) > 1 and line[1]["text"] == "Codes:":
@@ -244,21 +255,28 @@ def parse_pdf(path) -> ParseResult:
                     if isinstance(rem, str) and rem in STATUS_TOKENS:
                         status = STATUS_TOKENS[rem]
 
-                gross = _to_int(vals.get("gross_sales")) or 0
-                cans = _to_int(vals.get("cancellations")) or 0
+                reported = str(vals.get("traffic", "")).strip().upper() != "N/A"
+                gross = (_to_int(vals.get("gross_sales")) or 0) if reported else None
+                cans = (_to_int(vals.get("cancellations")) or 0) if reported else None
                 rec = Record(
                     week_ending=result.week_ending, market=market,
                     county_group=county_group, submarket=submarket,
                     community=name.strip(), builder=" ".join(builder_parts).strip(),
                     city_code=city_code.strip(), notes=notes.strip(), status_flag=status,
                     product_type=ptype.strip(), units=_to_int(vals.get("units")),
-                    gross_sales=gross, cancellations=cans, net_sales=gross - cans,
-                    sold_to_date=_to_int(vals.get("sold_to_date")), source_page=pno)
+                    gross_sales=gross, cancellations=cans,
+                    net_sales=(gross - cans) if reported else None,
+                    sold_to_date=_to_int(vals.get("sold_to_date")), source_page=pno,
+                    reported=reported)
                 result.records.append(rec)
                 if section is not None:
-                    section["rows"] += 1
-                    section["sales"] += gross
-                    section["cans"] += cans
+                    section["listed"] += 1
+                    if reported:
+                        section["rows"] += 1
+                        section["sales"] += gross
+                        section["cans"] += cans
+                    else:
+                        section["not_reported"].append(rec.community)
 
 
         # Resolve city codes: same page first, then the following pages (a

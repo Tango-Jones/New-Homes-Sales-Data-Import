@@ -2,6 +2,8 @@
 
 Reads the weekly SoCal Ryness Report PDF and updates `New_Home_Sales_Database.xlsx`:
 **Gross Sales** (Wk's Sales), **Cancellations** (Wk's Cans) and **Net Sales** (Gross - Cancellations, live formulas).
+Net Sales also carries Project Label, Pace Label (`46 of 79 sold | 0.00/wk (4 wk) | 0.23/wk (13 wk) | 0.52/wk (LOJ)`)
+and LOJ Pace (life-of-job: average of all weekly net sales).
 
 ## Setup (once)
 1. Install Python 3.10+ (python.org).
@@ -23,6 +25,20 @@ current names/units/status - those always come from the newest report. Flags (NE
 are re-evaluated across the whole timeline after every import, so backfilling doesn't create false flags.
 If an older PDF used a different layout, the totals check will show a mismatch before you import.
 
+## Great Park Neighborhoods (GPN) report
+Drop the GPN "General Distribution Report" PDF into the same uploader - it's recognised automatically.
+- GPN numbers **replace** Ryness for the same project and week (e.g. Moonlight, Isla, Rhea), in either import order.
+  The Ryness row is kept in Weekly_Data as "Ryness PDF (superseded by GPN)" for audit.
+- Projects Ryness doesn't carry (Toll Brothers at Great Park) get their weekly numbers from GPN; their Tracking becomes "GPN".
+- Names are matched automatically (builder + collection, e.g. "KB, Moonlight" -> Moonlight at Luna Park). If one
+  doesn't match, add a Name_Map row with the alias exactly as GPN prints it (e.g. `KB, Moonlight`) and the Community ID.
+- Collections that sold out before the report week and aren't in the database are skipped.
+- GPN numbers show in bold teal in the weekly tabs. Each neighborhood is checked against the report's own total row.
+
+## Projects that didn't report (N/R)
+When Ryness lists a project with Traffic "N/A", it didn't report that week. The tool records it as **N/R**
+(on the report, no numbers), not as 0 sales, so it is left out of totals and pace and is not flagged as sold out.
+
 ## What gets flagged
 | Event | Meaning |
 |---|---|
@@ -34,7 +50,9 @@ If an older PDF used a different layout, the totals check will show a mismatch b
 | POSSIBLE RENAME | A new and a dropped project with the same builder and similar names. Add a Name_Map row and re-import |
 
 ## Your editable parts (kept on every import)
-- **Communities** tab, yellow columns: Total Lots, Grand Opening, Tracking (Ryness / Manual), My Notes.
+- **Project Label** (Net Sales column F): your custom project name. Edit it in the app's **Project Labels** tab,
+  directly in Net Sales column F, or in the Communities tab - whichever you changed is kept.
+- **Communities** tab, yellow columns: Project Label, Total Lots, Grand Opening, Tracking (Ryness / Manual), My Notes.
 - **Name_Map**: alias -> existing Community ID.
 - **Manual_Entries**: weekly gross/cans for communities not on Ryness (Tracking = Manual, e.g. Toll Brothers at Great Park).
 
@@ -45,6 +63,7 @@ The three weekly grids are regenerated on each import, so don't type into them.
 
 ## Files
 - `ryness_parser.py` - PDF -> records (word-position based; validates every section's totals)
+- `gpn_parser.py` - Great Park Neighborhoods report -> records (validates each neighborhood total)
 - `sales_db.py` - matching, new/dropped/returned logic, legacy import
 - `workbook_writer.py` - builds the Excel tabs
 - `app.py` - Streamlit front end

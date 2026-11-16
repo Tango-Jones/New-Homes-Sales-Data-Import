@@ -23,6 +23,7 @@ F_NOTE = Font(name=FONT, size=8, italic=True, color="595959")
 F_SO = Font(name=FONT, size=7, color="808080")
 F_LEGACY = Font(name=FONT, size=9, italic=True, color="7F7F7F")
 F_MANUAL = Font(name=FONT, size=9, color="0000FF")
+F_GPN = Font(name=FONT, size=9, color="00806B", bold=True)
 F_MKT = Font(name=FONT, size=10, bold=True, color="FFFFFF")
 
 FILL_HDR = PatternFill("solid", fgColor="1F3864")
@@ -39,17 +40,12 @@ STATUS_FILL = {
     "SOLD OUT": PatternFill("solid", fgColor="D9D9D9"),
     "ACTIVE - ": PatternFill("solid", fgColor="FCE4D6"),
     "MANUAL": PatternFill("solid", fgColor="E4DFEC"),
+    "GPN": PatternFill("solid", fgColor="D9F2EC"),
 }
 THIN = Side(style="thin", color="A6A6A6")
 B_TOP = Border(top=THIN)
 CENTER = Alignment(horizontal="center", vertical="center")
 
-FIXED = [("Community", 32), ("Builder", 18), ("City", 15), ("Type", 6), ("Units", 6),
-         ("Status", 21), ("First Wk", 9), ("Last Rpt", 9), ("Total", 7),
-         ("4 Wk\nTotal", 6), ("4 Wk\nPace", 6), ("8 Wk\nTotal", 6), ("8 Wk\nPace", 6),
-         ("13 Wk\nTotal", 6), ("13 Wk\nPace", 6)]
-NF = len(FIXED)
-WK0 = NF + 2          # first week column (one spacer column)
 HDR_ROW, DATA0 = 4, 5
 
 
@@ -105,31 +101,62 @@ def _layout(comm):
     return out
 
 
+# Column layouts (key, header, width). Order matches Daniel's 11/13 workbook.
+_SUMMARY = [("t4", "4 Wk\nTotal", 13), ("p4", "4 Wk\nPace", 13), ("t8", "8 Wk\nTotal", 13),
+            ("p8", "8 Wk\nPace", 13), ("t13", "13 Wk\nTotal", 13), ("p13", "13 Wk\nPace", 13)]
+COLS = {
+    "base": [("community", "Community", 32), ("builder", "Builder", 18), ("city", "City", 12.3),
+             ("type", "Type", 6), ("status", "Status", 13), ("first", "First Wk", 9),
+             ("last", "Last Rpt", 13), ("units", "TotalUnits", 6), ("total", "Total Sold", 7)]
+            + _SUMMARY,
+    "net": [("community", "Community", 32), ("builder", "Builder", 18), ("city", "City", 12.3),
+            ("type", "Type", 6), ("status", "Status", 13), ("label", "Project Label", 29.4),
+            ("pace", "Pace Label", 13), ("first", "First Wk", 9), ("last", "Last Rpt", 13),
+            ("units", "TotalUnits", 6), ("total", "Total Sold", 7), ("loj", "LOJ Pace", 6)]
+           + _SUMMARY,
+}
+
+
+def _cols(kind):
+    cols = COLS["net" if kind == "net" else "base"]
+    C = {k: i for i, (k, _, _) in enumerate(cols, start=1)}
+    return cols, C, len(cols) + 2          # first week column (after one spacer)
+
+
 def _write_view(ws, kind, layout, weeks, cell_lookup, latest):
     """kind: 'gross' | 'cans' | 'net'"""
+    cols, C, WK0 = _cols(kind)
+    if kind == "cans":
+        cols = [(k, "Total Cans" if k == "total" else h, w) for k, h, w in cols]
+    _, _, GWK0 = _cols("gross")            # Net formulas point at the Gross/Cans week columns
+    CL = {k: L(i) for k, i in C.items()}
     titles = {"gross": "Gross Sales (Wk's Sales)", "cans": "Cancellations (Wk's Cans)",
               "net": "Net Sales (Gross Sales - Cancellations)"}
     last_col = WK0 + len(weeks) - 1
     ws["A1"] = f"SoCal New Home {titles[kind]} - The Ryness Report"
     ws["A1"].font = F_TITLE
-    ws["F1"] = f"Latest week ending: {latest:%m/%d/%Y}" if latest else ""
-    ws["F1"].font = F_BOLD
+    ws["E1"] = f"Latest week ending: {latest:%m/%d/%Y}" if latest else ""
+    ws["E1"].font = F_BOLD
     legend = ("SOLD OUT = community no longer on the Ryness report (kept for history).  "
+              "Bold teal = from the Great Park Neighborhoods (GPN) report, which replaces Ryness for those projects.  "
+              "N/R = listed on the report but didn't report that week (Traffic N/A) - left out of totals and pace.  "
               "Status colors: green NEW, blue ADDED (first week tracked), yellow RETURNED, "
               "red DROPPED this week, grey SOLD OUT, orange S/O or TSO per Ryness, purple MANUAL "
               "(not on Ryness - blue numbers come from the Manual_Entries tab).")
     if kind == "net":
         legend = ("Net = 'Gross Sales' - 'Cancellations' (live formulas).  Grey italic = legacy "
-                  "net-only history from New Home Sales Trends v4.  " + legend)
+                  "net-only history from New Home Sales Trends v4.  Project Label is yours to edit "
+                  "(here, in the Communities tab, or in the app) and is kept on every import.  " + legend)
     ws["A2"] = legend
     ws["A2"].font = F_NOTE
 
-    for i, (h, wdt) in enumerate(FIXED, start=1):
+    for i, (_, h, wdt) in enumerate(cols, start=1):
         c = ws.cell(HDR_ROW, i, h)
-        c.font, c.fill = F_HDR, FILL_HDR
+        c.font = F_HDR
+        c.fill = PatternFill("solid", fgColor="BF8F00") if cols[i - 1][0] == "label" else FILL_HDR
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
         ws.column_dimensions[L(i)].width = wdt
-    ws.column_dimensions[L(NF + 1)].width = 1.5
+    ws.column_dimensions[L(len(cols) + 1)].width = 1.5
     prev_m = None
     for j, wk in enumerate(weeks):
         col = WK0 + j
@@ -142,29 +169,37 @@ def _write_view(ws, kind, layout, weeks, cell_lookup, latest):
             mc.font = F_BOLD
             prev_m = wk.month
     ws.row_dimensions[HDR_ROW].height = 26
-    for lbl, col in (("Summary (last N weeks)", 9),):
-        ws.cell(3, col, lbl).font = F_NOTE
+    ws.cell(3, C["total"], "Summary (last N weeks)").font = F_NOTE
 
     nw = len(weeks)
     wc = lambda j: L(WK0 + j)
     rngs = {"all": (0, nw - 1), "4": (max(0, nw - 4), nw - 1), "8": (max(0, nw - 8), nw - 1),
             "13": (max(0, nw - 13), nw - 1)}
 
-    def summary(r, bold=False):
+    def summary(r, bold=False, community_row=False):
         f = F_BOLD if bold else F_BASE
-        spec = [(9, "SUM", "all"), (10, "SUM", "4"), (11, "AVG", "4"), (12, "SUM", "8"),
-                (13, "AVG", "8"), (14, "SUM", "13"), (15, "AVG", "13")]
-        for col, fn, k in spec:
+        spec = [("total", "SUM", "all"), ("t4", "SUM", "4"), ("p4", "AVG", "4"), ("t8", "SUM", "8"),
+                ("p8", "AVG", "8"), ("t13", "SUM", "13"), ("p13", "AVG", "13")]
+        if community_row and "loj" in C:
+            spec.append(("loj", "AVG", "all"))      # life-of-job pace: average of all weekly net sales
+        for key, fn, k in spec:
             a, b = rngs[k]
             rg = f"{wc(a)}{r}:{wc(b)}{r}"
             v = f"=SUM({rg})" if fn == "SUM" else f'=IFERROR(AVERAGE({rg}),"")'
-            c = ws.cell(r, col, v)
+            c = ws.cell(r, C[key], v)
             c.font = f
             c.number_format = "0.00" if fn == "AVG" else "0;[Red]-0;0"
             c.alignment = CENTER
+        if community_row and "pace" in C:
+            c = ws.cell(r, C["pace"],
+                        f'=IF({CL["loj"]}{r}="","",_xlfn.CONCAT({CL["total"]}{r}," of ",{CL["units"]}{r}," sold  |  ",'
+                        f'TEXT({CL["p4"]}{r},"0.00"),"/wk (4 wk)  |  ",'
+                        f'TEXT({CL["p13"]}{r},"0.00"),"/wk (13 wk)  |  ",'
+                        f'TEXT({CL["loj"]}{r},"0.00"),"/wk (LOJ)"))')
+            c.font = F_BASE
 
     r = DATA0
-    sec_rows, sub_rows, mkt_sub_cells, mkt_rows = [], [], [], []
+    sec_rows, sub_rows, mkt_rows = [], [], []
     for typ, obj in layout:
         if typ == "market":
             ws.cell(r, 1, obj)
@@ -184,22 +219,28 @@ def _write_view(ws, kind, layout, weeks, cell_lookup, latest):
             r += 1
         elif typ == "row":
             cr = obj
-            vals = [cr.community, cr.builder, cr.city, cr.product_type,
-                    cr.units if pd.notna(cr.units) else None, cr.status,
-                    cr.first_week, cr.last_reported]
-            for i, v in enumerate(vals, start=1):
+            vals = {"community": cr.community, "builder": cr.builder, "city": cr.city,
+                    "type": cr.product_type, "status": cr.status,
+                    "label": getattr(cr, "project_label", None),
+                    "first": cr.first_week, "last": cr.last_reported,
+                    "units": cr.units}
+            for key, v in vals.items():
+                if key not in C:
+                    continue
                 v = None if (v is None or (not isinstance(v, str) and pd.isna(v))) else v
-                c = ws.cell(r, i, v)
+                if hasattr(v, "item"):
+                    v = v.item()
+                c = ws.cell(r, C[key], v)
                 c.font = F_BASE
-                if i in (7, 8):
+                if key in ("first", "last"):
                     c.number_format = "m/d/yy"
                     c.alignment = CENTER
-                if i in (4, 5):
+                if key in ("type", "units"):
                     c.alignment = CENTER
             sf = _status_fill(cr.status)
             if sf:
                 ws.cell(r, 1).fill = sf
-                ws.cell(r, 6).fill = sf
+                ws.cell(r, C["status"]).fill = sf
             for j, wk in enumerate(weeks):
                 rec = cell_lookup.get((cr.community_id, wk))
                 if rec is None:
@@ -208,14 +249,17 @@ def _write_view(ws, kind, layout, weeks, cell_lookup, latest):
                 src, txt = rec["source"], rec["legacy_text"]
                 if src == "Not on report" or (isinstance(txt, str) and txt.upper() == "SOLD OUT"):
                     c.value, c.font, c.fill = "SOLD OUT", F_SO, FILL_SO
-                elif src in ("Ryness PDF", "Manual entry"):
+                elif src == "Ryness PDF" and txt == "N/R":
+                    c.value, c.font = "N/R", F_SO          # listed, didn't report: excluded from pace
+                elif src in ("Ryness PDF", "Manual entry", "GPN report"):
                     if kind == "gross":
                         c.value = int(rec["gross_sales"])
                     elif kind == "cans":
                         c.value = int(rec["cancellations"])
                     else:
-                        c.value = f"='Gross Sales'!{L(WK0 + j)}{r}-'Cancellations'!{L(WK0 + j)}{r}"
-                    c.font = F_MANUAL if src == "Manual entry" else F_BASE
+                        g = L(GWK0 + j)
+                        c.value = f"='Gross Sales'!{g}{r}-'Cancellations'!{g}{r}"
+                    c.font = F_MANUAL if src == "Manual entry" else (F_GPN if src == "GPN report" else F_BASE)
                     c.number_format = "0;[Red]-0;0"
                 else:   # legacy
                     if kind != "net":
@@ -227,14 +271,15 @@ def _write_view(ws, kind, layout, weeks, cell_lookup, latest):
                     elif isinstance(txt, str):
                         c.value, c.font = txt, F_SO
                 c.alignment = CENTER
-            summary(r)
+            summary(r, community_row=True)
             sec_rows.append(r)
             r += 1
         elif typ == "subtotal":
             ws.cell(r, 1, f"{obj} Total")
             if sec_rows:
                 a, b = sec_rows[0], sec_rows[-1]
-                ws.cell(r, 5, f"=SUM(E{a}:E{b})")
+                u = CL["units"]
+                ws.cell(r, C["units"], f"=SUM({u}{a}:{u}{b})")
                 for j in range(nw):
                     rg = f"{wc(j)}{a}:{wc(j)}{b}"
                     ws.cell(r, WK0 + j, f'=IF(COUNT({rg})=0,"",SUM({rg}))').number_format = "0;[Red]-0;0"
@@ -243,40 +288,31 @@ def _write_view(ws, kind, layout, weeks, cell_lookup, latest):
                 c = ws.cell(r, col)
                 c.fill, c.border = FILL_SUB, B_TOP
                 c.font = F_BOLD
-                if col >= WK0:
+                if col >= WK0 or col == C["units"]:
                     c.alignment = CENTER
             sub_rows.append(r)
             r += 2
-        elif typ == "mtotal":
-            ws.cell(r, 1, f"{obj} Total")
-            refs = lambda colL: "=" + "+".join(f"{colL}{x}" for x in sub_rows) if sub_rows else None
-            ws.cell(r, 5, refs("E"))
+        elif typ in ("mtotal", "gtotal"):
+            rows = sub_rows if typ == "mtotal" else mkt_rows
+            ws.cell(r, 1, f"{obj} Total" if typ == "mtotal" else "SoCal Total (all markets)")
+            if rows:
+                ws.cell(r, C["units"], "=" + "+".join(f"{CL['units']}{x}" for x in rows))
             for j in range(nw):
-                ws.cell(r, WK0 + j, _sum_if_any(wc(j), sub_rows)).number_format = "0;[Red]-0;0"
+                ws.cell(r, WK0 + j, _sum_if_any(wc(j), rows)).number_format = "0;[Red]-0;0"
             summary(r, bold=True)
             for col in range(1, last_col + 1):
                 c = ws.cell(r, col)
-                c.fill, c.font = FILL_SEC, F_BOLD
-                if col >= WK0:
+                if typ == "mtotal":
+                    c.fill, c.font = FILL_SEC, F_BOLD
+                else:
+                    c.fill, c.font = FILL_HDR, F_HDR
+                if col >= WK0 or col == C["units"]:
                     c.alignment = CENTER
-            mkt_rows.append(r)
+            if typ == "mtotal":
+                mkt_rows.append(r)
             r += 2
-        elif typ == "gtotal":
-            ws.cell(r, 1, "SoCal Total (all markets)")
-            refs = lambda colL: "=" + "+".join(f"{colL}{x}" for x in mkt_rows)
-            ws.cell(r, 5, refs("E"))
-            for j in range(nw):
-                ws.cell(r, WK0 + j, _sum_if_any(wc(j), mkt_rows)).number_format = "0;[Red]-0;0"
-            summary(r, bold=True)
-            for col in range(1, last_col + 1):
-                c = ws.cell(r, col)
-                c.fill, c.font = FILL_HDR, F_HDR
-                if col >= WK0:
-                    c.alignment = CENTER
-    ws.freeze_panes = ws.cell(DATA0, WK0)
-    # open scrolled to the most recent ~10 weeks
-    if nw > 12 and ws.sheet_view.pane is not None:
-        ws.sheet_view.pane.topLeftCell = f"{wc(nw - 10)}{DATA0}"
+    # Freeze headers + Community/Builder/City (as in the 11/13 workbook)
+    ws.freeze_panes = ws.cell(DATA0, C["type"])
     ws.sheet_view.zoomScale = 90
     ws.sheet_properties.outlinePr.summaryBelow = False
 
@@ -322,7 +358,8 @@ def write_workbook(db, path, header_map):
     latest = max(pdf_weeks) if len(pdf_weeks) else (weeks[-1] if weeks else None)
     for col in ("first_week", "last_reported"):
         comm[col] = pd.to_datetime(comm[col], errors="coerce").dt.date
-    lookup = {(r["community_id"], r["week_ending"]): r for r in weekly.to_dict("records")}
+    lookup = {(r["community_id"], r["week_ending"]): r for r in weekly.to_dict("records")
+              if r["source"] != "Ryness PDF (superseded by GPN)"}
     layout = _layout(comm)
 
     wb = Workbook()
@@ -355,11 +392,12 @@ def write_workbook(db, path, header_map):
     ws = wb.create_sheet("Communities")
     ws["A1"] = "Communities - master list (never deleted; sold-out projects stay for history)"
     ws["A1"].font = F_TITLE
-    ws["A2"] = ("Yellow columns (Total Lots, Grand Opening, Tracking, My Notes) are yours to edit and are "
+    ws["A2"] = ("Yellow columns (Project Label, Total Lots, Grand Opening, Tracking, My Notes) are yours to edit and are "
                 "preserved on every import. Tracking: Ryness (default) or Manual (not on the report - "
                 "never flagged sold out; enter weeks in Manual_Entries). Other columns refresh from the latest PDF.")
     ws["A2"].font = F_NOTE
     cdf = comm.copy()
+    cdf["project_label_saved"] = cdf["project_label"]
     for col in ("grand_opening", "last_pdf_week"):
         cdf[col] = pd.to_datetime(cdf[col], errors="coerce").dt.date
     cdf["_lay"] = cdf["community_id"].map(
@@ -367,15 +405,16 @@ def write_workbook(db, path, header_map):
     cdf = cdf.sort_values("_lay").drop(columns="_lay")
     _plain_table(ws, cdf, 3, header_map=header_map,
                  widths={"community_id": 30, "community": 32, "builder": 18, "county_group": 22,
-                         "submarket": 22, "status": 18, "user_notes": 30, "legacy_name": 26},
+                         "submarket": 22, "status": 18, "user_notes": 30, "legacy_name": 26,
+                         "project_label": 32},
                  date_cols=("grand_opening", "first_week", "last_reported", "last_pdf_week"),
-                 input_cols=("total_lots", "grand_opening", "tracking", "user_notes"))
+                 input_cols=("project_label", "total_lots", "grand_opening", "tracking", "user_notes"))
     st_col = list(cdf.columns).index("status") + 1
     for r in range(4, ws.max_row + 1):
         f = _status_fill(ws.cell(r, st_col).value)
         if f:
             ws.cell(r, st_col).fill = f
-    for colname in ("m_ord", "s_ord", "r_ord"):
+    for colname in ("m_ord", "s_ord", "r_ord", "project_label_saved"):
         idx = list(cdf.columns).index(colname) + 1
         ws.column_dimensions[L(idx)].hidden = True
 
@@ -449,9 +488,12 @@ def write_workbook(db, path, header_map):
         ("", F_BASE),
         ("Tabs", F_BOLD),
         ("Gross Sales / Cancellations / Net Sales - weekly views, grouped by market and submarket, with 4/8/13-week totals and pace.", F_BASE),
+        ("Net Sales also has Project Label (your custom name - edit here, in Communities, or in the app's Project Labels tab), "
+         "Pace Label (sold-of-units plus 4-wk, 13-wk and LOJ pace) and LOJ Pace (average of all weekly net sales).", F_BASE),
         ("Change_Log - NEW, ADDED, DROPPED, RETURNED, FLAG S/O, FLAG TSO and POSSIBLE RENAME events by week.", F_BASE),
         ("Communities - master list with status. Yellow columns are yours to edit and are kept on every import.", F_BASE),
-        ("Name_Map - aliases for renamed projects.", F_BASE),
+        ("Name_Map - aliases for renamed projects, and for GPN names that don't match automatically (alias exactly as GPN prints it, e.g. 'KB, Moonlight').", F_BASE),
+        ("GPN report - Great Park Neighborhoods numbers replace Ryness for the same project and week; shown in bold teal.", F_BASE),
         ("Manual_Entries - weekly gross/cans for communities you track outside Ryness (Tracking = Manual).", F_BASE),
         ("Weekly_Data - one row per community per week (the table to load into an online database later).", F_BASE),
         ("Import_Log - one row per import with totals and warnings.", F_BASE),
