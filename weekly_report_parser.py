@@ -30,6 +30,8 @@ HEADER_KEYS = {  # header word -> column (bottom line of each column label)
 }
 # Left-side text columns are found from the "Development Name / Developer /
 # City Code / Notes / Type" header on each page.
+HEADER_RE = re.compile(r"Develop(?:e)?ment Name")
+HEADER_WORDS = ("Development", "Developement")
 STATUS_TOKENS = {"S/O": "S/O", "TSO": "TSO", "SO": "S/O"}
 DATE_RE = re.compile(r"(January|February|March|April|May|June|July|August|"
                      r"September|October|November|December)\s+(\d{1,2}),\s+(\d{4})")
@@ -120,7 +122,8 @@ def parse_pdf(path) -> ParseResult:
                     result.warnings.append(
                         f"Page {pno}: week ending {d} differs from {result.week_ending}")
 
-            if "Development Name" not in text:
+            # older reports spell the header "Developement Name"
+            if not HEADER_RE.search(text):
                 # Market summary page (e.g. 'LA-Orange-North' cover). Grab market name.
                 for line in text.split("\n")[:6]:
                     s = line.strip()
@@ -138,7 +141,7 @@ def parse_pdf(path) -> ParseResult:
             lines = _merge_wrapped(_lines(words))
 
             # Left text-column boundaries from the "Development Name ... Type" header
-            hdr = next((l for l in lines if l and l[0]["text"] == "Development"), None)
+            hdr = next((l for l in lines if l and l[0]["text"] in HEADER_WORDS), None)
             if hdr is None:
                 result.warnings.append(f"Page {pno}: header row not found; skipped")
                 continue
@@ -311,7 +314,7 @@ def _merge_wrapped(lines):
         if i in data_idx or not l or l[0]["x0"] > 30:
             continue
         txt = " ".join(w["text"] for w in l)
-        if txt.startswith(("City Codes", "Development", "TOTALS", "GRAND")) or "|" in txt:
+        if txt.startswith(("City Codes", "TOTALS", "GRAND") + tuple(HEADER_WORDS)) or "|" in txt:
             continue
         if any(w["x0"] > 370 for w in l):
             continue

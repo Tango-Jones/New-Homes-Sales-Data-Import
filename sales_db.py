@@ -309,6 +309,53 @@ def fill_city_centers(comm):
     return comm
 
 
+def read_label_sheet(file) -> pd.DataFrame:
+    """Read a spreadsheet of project labels: any sheet with a header row that has
+    'Community' and a column whose name contains 'Label' (e.g. a copy of Net Sales)."""
+    xl = pd.ExcelFile(file)
+    for sheet in xl.sheet_names:
+        raw = pd.read_excel(xl, sheet, header=None, dtype=object, nrows=15)
+        for i, row in raw.iterrows():
+            vals = [str(v).strip() for v in row.tolist()]
+            if "Community" in vals and any("label" in v.lower() and "pace" not in v.lower() for v in vals):
+                df = pd.read_excel(xl, sheet, header=i, dtype=object)
+                lab = next(c for c in df.columns if "label" in str(c).lower() and "pace" not in str(c).lower())
+                out = pd.DataFrame({"community": df["Community"], "builder": df.get("Builder"),
+                                    "city": df.get("City"), "label": df[lab]})
+                out = out[out["community"].notna() & out["label"].notna()]
+                out = out[out["label"].astype(str).str.strip() != ""]
+                return out.reset_index(drop=True)
+    raise ValueError("No sheet with a 'Community' column and a 'Project Label' column was found.")
+
+
+def import_labels(db, rows: pd.DataFrame, overwrite=True) -> dict:
+    """Apply labels from read_label_sheet(); match on community + builder + city,
+    then community + builder, then a looser name match with the same builder."""
+    c = db["communities"]
+    exact, by_cb = {}, {}
+    for r in c.itertuples():
+        exact.setdefault((_clean(r.community), _clean(r.builder), _clean(r.city)), []).append(r.community_id)
+        by_cb.setdefault((_clean(r.community), _clean(r.builder)), []).append(r.community_id)
+    applied, unmatched, skipped = {}, [], 0
+    for r in rows.itertuples():
+        com, bld, cty, lab = _clean(r.community), _clean(r.builder), _clean(r.city), _clean(r.label)
+        ids = exact.get((com, bld, cty)) or by_cb.get((com, bld))
+        if not ids or len(ids) != 1:
+            cand = c[(c["community"].map(norm_name) == norm_name(com)) &
+                     c["builder"].map(lambda b: builder_match(b, bld))]
+            ids = list(cand["community_id"])
+        if len(ids) != 1:
+            unmatched.append(f"{com} ({bld}, {cty})")
+            continue
+        cur = c.loc[c["community_id"] == ids[0], "project_label"].iloc[0]
+        if not overwrite and _clean(cur):
+            skipped += 1
+            continue
+        applied[ids[0]] = lab
+    set_project_labels(db, applied)
+    return {"applied": len(applied), "unmatched": unmatched, "skipped": skipped}
+
+
 def set_project_labels(db, labels: dict):
     """labels: {community_id: label or ''}. Used by the app's label editor."""
     c = db["communities"]
@@ -733,7 +780,10 @@ def finalize(db):
     # 3) Community status, relative to the latest week that covers each community
     ev_at = {(r.community_id, r.week_ending): r.event for r in chg.itertuples()
              if r.event in ("NEW", "ADDED", "RETURNED", "DROPPED")}
-    latest_flag = (pdf_rows.sort_values("week_ending").groupby("community_id")["report_flag"].last())
+    # flag on the community's most recent report row (blank = no flag that week);
+    # .last() alone would skip blanks and return a flag from months ago
+    latest_flag = (pdf_rows.assign(report_flag=pdf_rows["report_flag"].fillna(""))
+                   .sort_values("week_ending").groupby("community_id")["report_flag"].last())
     first_present = pres.groupby("community_id")["week_ending"].min()
     last_present = pres.groupby("community_id")["week_ending"].max()
 

@@ -18,6 +18,12 @@ and LOJ Pace (life-of-job: average of all weekly net sales).
 3. Click **Import into database**. The workbook is saved in place; a download copy is also offered.
    Close the workbook in Excel before importing so it can be saved.
 
+## Running online (Streamlit Community Cloud)
+The app's disk online is temporary, so work from a copy: choose **Upload a copy** in the sidebar (the default
+online), make your imports and edits, then click **Download workbook** in the sidebar. The download always
+includes every change made in the session - imports, project labels and coordinates. A yellow note in the
+sidebar reminds you when there are changes you haven't downloaded yet.
+
 ## Backfilling older reports
 Reports can be imported in any order, including weeks before 03/02/2025. Drop several PDFs in at once;
 each lands in its own week column, and the grids extend back automatically. Older reports never overwrite
@@ -58,8 +64,10 @@ When The report lists a project with Traffic "N/A", it didn't report that week. 
 | POSSIBLE RENAME | A new and a dropped project with the same builder and similar names. Add a Name_Map row and re-import |
 
 ## Your editable parts (kept on every import)
-- **Project Label** (Net Sales column F): your custom project name. Edit it in the app's **Project Labels** tab,
-  directly in Net Sales column F, or in the Communities tab - whichever you changed is kept.
+- **Project Label** (Net Sales column F): your custom project name. Edit it in the app's **Project Labels** tab
+  (each change is kept as soon as you press Enter), directly in Net Sales column F, or in the Communities tab -
+  whichever you changed is kept. To load many at once, use **Load labels from a spreadsheet** on that tab
+  (any .xlsx with Community, Builder, City and Project Label columns, e.g. a copy of the Net Sales tab).
 - **Communities** tab, yellow columns: Project Label, Total Lots, Grand Opening, Tracking (Weekly report / Manual / GPN), My Notes.
 - **Name_Map**: alias -> existing Community ID.
 - **Manual_Entries**: weekly gross/cans for communities not on the weekly report (Tracking = Manual, e.g. Toll Brothers at Great Park).

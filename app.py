@@ -19,6 +19,8 @@ from gpn_parser import is_gpn_pdf, parse_gpn
 st.set_page_config(page_title="New Home Sales Weekly Import", layout="wide")
 
 DEFAULT_DB = os.environ.get("NHS_DB", str(Path(__file__).with_name("New_Home_Sales_Database.xlsx")))
+# On Streamlit Community Cloud the app's disk is temporary: work from an uploaded copy and download it.
+ON_CLOUD = str(Path(__file__).resolve()).startswith("/mount/src")
 
 
 def copy_db(db):
@@ -50,13 +52,19 @@ def style_events(df):
 # ----------------------------------------------------------------- sidebar: database
 st.sidebar.header("1. Database workbook")
 mode = st.sidebar.radio("Where is the database?", ["File on this computer", "Upload a copy"],
-                        help="'File on this computer' reads and saves the workbook in place.")
+                        index=1 if ON_CLOUD else 0,
+                        help="'File on this computer' reads and saves the workbook in place. "
+                             "Online (Streamlit Cloud), use 'Upload a copy' and download the result.")
+if ON_CLOUD and mode == "File on this computer":
+    st.sidebar.warning("This app is running online: files saved here are wiped when the app restarts. "
+                       "Use 'Upload a copy' and download the workbook when you're done.")
 if mode == "File on this computer":
     db_path = st.sidebar.text_input("Workbook path", DEFAULT_DB)
     if st.sidebar.button("Load / reload", width="stretch") or "db" not in st.session_state:
         if Path(db_path).exists():
             st.session_state.db = sdb.load_db(db_path)
             st.session_state.db_name = Path(db_path).name
+            st.session_state.dirty = False
         else:
             st.session_state.db = sdb.empty_db()
             st.session_state.db_name = Path(db_path).name
@@ -68,6 +76,7 @@ else:
         st.session_state.db = sdb.load_db(io.BytesIO(up.getvalue()))
         st.session_state.db_name = up.name
         st.session_state.db_upload_id = up.file_id
+        st.session_state.dirty = False
     if "db" not in st.session_state:
         st.session_state.db = sdb.empty_db()
         st.session_state.db_name = "New_Home_Sales_Database.xlsx"
@@ -78,6 +87,27 @@ pdf_weeks = sorted(set(weekly.loc[weekly["source"].isin(sdb.PDF_SOURCES), "week_
 st.sidebar.metric("Communities tracked", len(comm))
 st.sidebar.caption(f"Weekly reports imported: {len(pdf_weeks)}"
                    + (f" (latest {pdf_weeks[-1]:%m/%d/%Y})" if pdf_weeks else ""))
+
+def _clear_dirty():
+    st.session_state.dirty = False
+
+
+if len(comm):
+    st.sidebar.divider()
+    if st.session_state.get("dirty"):
+        st.sidebar.warning("You have changes that aren't " + ("saved" if db_path else "downloaded") + " yet.")
+    if db_path and st.sidebar.button("Save workbook", type="primary" if st.session_state.get("dirty") else "secondary",
+                                     width="stretch"):
+        sdb.save_db(st.session_state.db, db_path)
+        st.session_state.dirty = False
+        st.rerun()
+    _snapshot = st.session_state.db
+    st.sidebar.download_button("Download workbook", data=lambda: db_bytes(_snapshot),
+                               file_name=st.session_state.get("db_name", "New_Home_Sales_Database.xlsx"),
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                               on_click=_clear_dirty, width="stretch",
+                               type="primary" if (st.session_state.get("dirty") and not db_path) else "secondary")
+    st.sidebar.caption("The download includes every change made in this session (imports, labels, locations).")
 
 st.title("New Home Sales Weekly Import")
 tab_imp, tab_lbl, tab_geo, tab_db, tab_legacy = st.tabs(["Import PDF", "Project Labels", "Locations", "Database", "One-time legacy import"])
@@ -104,6 +134,17 @@ with tab_imp:
         gpn_parsed.sort(key=lambda x: x[1].week_ending or pd.Timestamp.min.date())
         preview = copy_db(db)
         summaries = []
+        unreadable = [(n, r) for n, r in parsed if not r.records or r.week_ending is None]
+        for name, res in unreadable:
+            st.error(f"**{name}**: no community rows could be read from this PDF"
+                     + (f" (week ending {res.week_ending:%m/%d/%Y})" if res.week_ending else "")
+                     + ". Its layout differs from the reports the tool knows, so it was skipped. "
+                     "Send a copy of this PDF so the reader can be updated for it.")
+        parsed = [(n, r) for n, r in parsed if r.records and r.week_ending is not None]
+        gpn_bad = [(n, r) for n, r in gpn_parsed if not r.records or r.week_ending is None]
+        for name, res in gpn_bad:
+            st.error(f"**{name}**: no collections could be read from this GPN report, so it was skipped.")
+        gpn_parsed = [(n, r) for n, r in gpn_parsed if r.records and r.week_ending is not None]
         for name, res in parsed:
             df = res.to_frame()
             st.markdown(f"#### {name} &mdash; week ending **{res.week_ending:%A, %B %d, %Y}**")
@@ -179,24 +220,19 @@ with tab_imp:
             st.divider()
 
         st.subheader("3. Import")
-        if st.button("Import into database", type="primary", width="stretch"):
+        if st.button("Import into database", type="primary", width="stretch", disabled=not (parsed or gpn_parsed)):
             st.session_state.db = preview
-            st.session_state.out_bytes = db_bytes(preview)
+            st.session_state.dirty = True
             if db_path:
                 Path(db_path).parent.mkdir(parents=True, exist_ok=True)
                 sdb.save_db(preview, db_path)
-                st.success(f"Saved to {db_path}")
+                st.session_state.dirty = False
             st.session_state.just_imported = True
             st.rerun()
 
     if st.session_state.pop("just_imported", False):
-        st.success("Import complete. Download the updated workbook below (or open it from its path).")
-
-    if "out_bytes" in st.session_state:
-        st.download_button("Download updated workbook", data=st.session_state.out_bytes,
-                           file_name=st.session_state.get("db_name", "New_Home_Sales_Database.xlsx"),
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           width="stretch")
+        st.success("Import complete." + (f" Saved to {db_path}." if db_path else
+                                         " Use **Download workbook** in the sidebar to keep it."))
 
 # ----------------------------------------------------------------- database tab
 with tab_db:
@@ -230,10 +266,36 @@ with tab_lbl:
     if not len(comm):
         st.info("Database is empty - import a PDF first.")
     else:
-        st.markdown("Type your own name for any project in **Project Label**, then click **Save labels**. "
-                    "Labels show in column F of the Net Sales tab and are kept on every import. "
-                    "(You can also type them straight into the Net Sales or Communities tab in Excel - "
-                    "the app picks those up the next time it loads the workbook.)")
+        st.markdown("Type your own name for any project in **Project Label** - each change is kept as soon as "
+                    "you press Enter or click away, including when you change the filters. Labels show in "
+                    "column F of the Net Sales tab. "
+                    + ("Click **Save workbook** in the sidebar to write them to the file."
+                       if db_path else "Use **Download workbook** in the sidebar to keep them."))
+        with st.expander("Load labels from a spreadsheet"):
+            st.caption("Any .xlsx with a header row that has **Community** (and ideally Builder and City) and a "
+                       "**Project Label** column - for example a copy of the Net Sales tab.")
+            lf = st.file_uploader("Label spreadsheet", type=["xlsx"], key="lbl_file")
+            overwrite = st.checkbox("Replace labels that are already filled in", value=True)
+            if lf is not None and st.button("Apply labels from file"):
+                try:
+                    rows = sdb.read_label_sheet(io.BytesIO(lf.getvalue()))
+                    rep_ = sdb.import_labels(st.session_state.db, rows, overwrite=overwrite)
+                    st.session_state.dirty = True
+                    st.session_state.lbl_ver = st.session_state.get("lbl_ver", 0) + 1
+                    msg = f"Applied {rep_['applied']} of {len(rows)} labels."
+                    if rep_["skipped"]:
+                        msg += f" {rep_['skipped']} kept their existing label."
+                    st.session_state.lbl_msg = msg
+                    st.session_state.lbl_unmatched = rep_["unmatched"]
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Couldn't read that file: {e}")
+        if "lbl_msg" in st.session_state:
+            st.success(st.session_state.pop("lbl_msg"))
+            um = st.session_state.pop("lbl_unmatched", [])
+            if um:
+                st.warning("Not matched to a community (check the name/builder/city): " + "; ".join(um))
+
         f1, f2, f3, f4 = st.columns([1.2, 1.6, 1.6, 1])
         mk = f1.selectbox("Market", ["All"] + sorted(comm["market"].dropna().unique()))
         pool = comm if mk == "All" else comm[comm["market"] == mk]
@@ -255,25 +317,25 @@ with tab_lbl:
         ].reset_index(drop=True)
         st.caption(f"{len(view)} communities shown - "
                    f"{int(comm['project_label'].notna().sum())} of {len(comm)} have a label")
-        edited = st.data_editor(
-            view, hide_index=True, width="stretch", height=520, key=f"lbl_editor_{mk}_{sm}_{q}_{only_blank}_{hide_so}",
+        ekey = f"lbl_editor_{st.session_state.get('lbl_ver', 0)}_{mk}_{sm}_{q}_{only_blank}_{hide_so}"
+        st.session_state.lbl_ids = list(view["community_id"])
+
+        def _apply_label_edits(ekey=ekey):
+            edits = (st.session_state.get(ekey) or {}).get("edited_rows", {})
+            ids = st.session_state.get("lbl_ids", [])
+            ch = {ids[int(i)]: (v.get("project_label") or "") for i, v in edits.items()
+                  if "project_label" in v and int(i) < len(ids)}
+            if ch:
+                sdb.set_project_labels(st.session_state.db, ch)
+                st.session_state.dirty = True
+                # fresh editor next run, so row positions can't drift when a filter hides the row
+                st.session_state.lbl_ver = st.session_state.get("lbl_ver", 0) + 1
+
+        st.data_editor(
+            view, hide_index=True, width="stretch", height=520, key=ekey, on_change=_apply_label_edits,
             disabled=["community_id", "submarket", "community", "builder", "city", "product_type", "status"],
             column_config={"project_label": st.column_config.TextColumn("Project Label", width="large"),
                            "community_id": None, "product_type": "Type"})
-        before = dict(zip(view["community_id"], view["project_label"].fillna("").astype(str)))
-        after = dict(zip(edited["community_id"], edited["project_label"].fillna("").astype(str)))
-        changed = {k: v for k, v in after.items() if v.strip() != before.get(k, "").strip()}
-        st.write(f"{len(changed)} unsaved change(s)" if changed else "No unsaved changes")
-        if st.button("Save labels", type="primary", disabled=not changed):
-            sdb.set_project_labels(st.session_state.db, changed)
-            st.session_state.out_bytes = db_bytes(st.session_state.db)
-            if db_path:
-                sdb.save_db(st.session_state.db, db_path)
-            st.session_state.lbl_msg = (f"Saved {len(changed)} label(s)" +
-                                        (f" to {db_path}" if db_path else " - download the updated workbook on the Import PDF tab."))
-            st.rerun()
-        if "lbl_msg" in st.session_state:
-            st.success(st.session_state.pop("lbl_msg"))
 
 
 # ----------------------------------------------------------------- locations tab
@@ -327,9 +389,10 @@ with tab_geo:
                     sdb.save_db(st.session_state.db, db_path)
             sdb.set_locations(st.session_state.db, found)
             sdb.finalize(st.session_state.db)
-            st.session_state.out_bytes = db_bytes(st.session_state.db)
+            st.session_state.dirty = True
             if db_path:
                 sdb.save_db(st.session_state.db, db_path)
+                st.session_state.dirty = False
             st.session_state.geo_msg = (f"Found {len(found)} of {len(todo)} on OpenStreetMap; "
                                         f"the rest stay at their city center.")
             st.rerun()
@@ -345,23 +408,33 @@ with tab_geo:
         view = view[["community_id", "community", "builder", "city", "latitude", "longitude", "geo_source"]] \
             .assign(latitude=lambda d: pd.to_numeric(d["latitude"], errors="coerce"),
                     longitude=lambda d: pd.to_numeric(d["longitude"], errors="coerce")).reset_index(drop=True)
-        ed = st.data_editor(view, hide_index=True, width="stretch", height=420, key=f"geo_ed_{q}",
-                            disabled=["community_id", "community", "builder", "city", "geo_source"],
-                            column_config={"community_id": None,
-                                           "latitude": st.column_config.NumberColumn("Latitude", format="%.8f"),
-                                           "longitude": st.column_config.NumberColumn("Longitude", format="%.8f"),
-                                           "geo_source": "Source"})
-        chg = {}
-        for a, b in zip(view.itertuples(), ed.itertuples()):
-            if not (sdb._same(sdb._f(a.latitude), sdb._f(b.latitude)) and sdb._same(sdb._f(a.longitude), sdb._f(b.longitude))):
-                chg[b.community_id] = (sdb._f(b.latitude), sdb._f(b.longitude), gc.MANUAL_SOURCE)
-        if st.button("Save coordinates", type="primary", disabled=not chg):
-            sdb.set_locations(st.session_state.db, chg)
-            st.session_state.out_bytes = db_bytes(st.session_state.db)
-            if db_path:
-                sdb.save_db(st.session_state.db, db_path)
-            st.session_state.geo_msg = f"Saved {len(chg)} location(s)."
-            st.rerun()
+        gkey = f"geo_ed_{st.session_state.get('geo_ver', 0)}_{q}"
+        st.session_state.geo_rows = view[["community_id", "latitude", "longitude"]].to_dict("records")
+
+        def _apply_geo_edits(gkey=gkey):
+            edits = (st.session_state.get(gkey) or {}).get("edited_rows", {})
+            rows = st.session_state.get("geo_rows", [])
+            ch = {}
+            for i, v in edits.items():
+                i = int(i)
+                if i >= len(rows):
+                    continue
+                r = rows[i]
+                lat = sdb._f(v.get("latitude", r["latitude"]))
+                lon = sdb._f(v.get("longitude", r["longitude"]))
+                ch[r["community_id"]] = (lat, lon, gc.MANUAL_SOURCE)
+            if ch:
+                sdb.set_locations(st.session_state.db, ch)
+                st.session_state.dirty = True
+                st.session_state.geo_ver = st.session_state.get("geo_ver", 0) + 1
+
+        st.data_editor(view, hide_index=True, width="stretch", height=420, key=gkey, on_change=_apply_geo_edits,
+                       disabled=["community_id", "community", "builder", "city", "geo_source"],
+                       column_config={"community_id": None,
+                                      "latitude": st.column_config.NumberColumn("Latitude", format="%.8f"),
+                                      "longitude": st.column_config.NumberColumn("Longitude", format="%.8f"),
+                                      "geo_source": "Source"})
+        st.caption("Each coordinate you type is kept as soon as you press Enter (marked Manual).")
         if len(comm):
             pts = comm.assign(lat=pd.to_numeric(comm["latitude"], errors="coerce"),
                               lon=pd.to_numeric(comm["longitude"], errors="coerce")).dropna(subset=["lat", "lon"])
@@ -378,8 +451,8 @@ with tab_legacy:
     if lf is not None and st.button("Merge legacy history"):
         rep, cmp_ = sdb.import_legacy(st.session_state.db, io.BytesIO(lf.getvalue()), lf.name)
         st.session_state.db["legacy_report"], st.session_state.db["legacy_compare"] = rep, cmp_
+        st.session_state.dirty = not db_path
         if db_path:
             sdb.save_db(st.session_state.db, db_path)
-        st.session_state.out_bytes = db_bytes(st.session_state.db)
         st.dataframe(rep["method"].value_counts())
         st.dataframe(rep, width="stretch", hide_index=True)
