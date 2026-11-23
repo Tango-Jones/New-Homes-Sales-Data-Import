@@ -1,5 +1,5 @@
 """
-Ryness Weekly Import - Streamlit app
+New Home Sales Weekly Import - Streamlit app
 Run:  streamlit run app.py
 """
 from __future__ import annotations
@@ -13,12 +13,12 @@ import pandas as pd
 import streamlit as st
 
 import sales_db as sdb
-from ryness_parser import parse_pdf
+from weekly_report_parser import parse_pdf
 from gpn_parser import is_gpn_pdf, parse_gpn
 
-st.set_page_config(page_title="Ryness Weekly Import", layout="wide")
+st.set_page_config(page_title="New Home Sales Weekly Import", layout="wide")
 
-DEFAULT_DB = os.environ.get("RYNESS_DB", str(Path(__file__).with_name("New_Home_Sales_Database.xlsx")))
+DEFAULT_DB = os.environ.get("NHS_DB", str(Path(__file__).with_name("New_Home_Sales_Database.xlsx")))
 
 
 def copy_db(db):
@@ -76,16 +76,16 @@ db = st.session_state.db
 comm, weekly = db["communities"], db["weekly"]
 pdf_weeks = sorted(set(weekly.loc[weekly["source"].isin(sdb.PDF_SOURCES), "week_ending"]))
 st.sidebar.metric("Communities tracked", len(comm))
-st.sidebar.caption(f"Ryness weeks imported: {len(pdf_weeks)}"
+st.sidebar.caption(f"Weekly reports imported: {len(pdf_weeks)}"
                    + (f" (latest {pdf_weeks[-1]:%m/%d/%Y})" if pdf_weeks else ""))
 
-st.title("Ryness Weekly Import")
-tab_imp, tab_lbl, tab_db, tab_legacy = st.tabs(["Import PDF", "Project Labels", "Database", "One-time legacy import"])
+st.title("New Home Sales Weekly Import")
+tab_imp, tab_lbl, tab_geo, tab_db, tab_legacy = st.tabs(["Import PDF", "Project Labels", "Locations", "Database", "One-time legacy import"])
 
 # ----------------------------------------------------------------- import tab
 with tab_imp:
-    st.subheader("2. Upload Ryness and/or GPN report PDFs")
-    pdfs = st.file_uploader("Ryness Report and Great Park Neighborhoods (GPN) PDFs - any week, newer or older; "
+    st.subheader("2. Upload weekly sales report and/or GPN report PDFs")
+    pdfs = st.file_uploader("Weekly sales report and Great Park Neighborhoods (GPN) PDFs - any week, newer or older; "
                             "several can be loaded at once. The report type is detected automatically.",
                             type=["pdf"], accept_multiple_files=True)
     parsed, gpn_parsed = [], []
@@ -128,7 +128,7 @@ with tab_imp:
             for w in res.warnings:
                 st.warning(w)
             if res.notes:
-                with st.expander(f"{len(res.notes)} section(s) list more projects than Ryness counts as reporting (sales and cans still match)"):
+                with st.expander(f"{len(res.notes)} section(s) list more projects than the report counts as reporting (sales and cans still match)"):
                     for n in res.notes:
                         st.caption(n)
             with st.expander("Market totals and section checks"):
@@ -172,10 +172,10 @@ with tab_imp:
             with st.expander("GPN name -> community matches", expanded=bool(len(unmatched))):
                 st.dataframe(m[["gpn_name", "neighborhood", "community", "match"]], width="stretch", hide_index=True)
             if len(s["overrides"]):
-                st.markdown("**GPN replaces these Ryness numbers for the week:**")
+                st.markdown("**GPN replaces these weekly report numbers for the week:**")
                 st.dataframe(s["overrides"], width="stretch", hide_index=True)
             else:
-                st.caption("Where both reports cover a project this week, the numbers agree (or Ryness isn't imported yet for this week).")
+                st.caption("Where both reports cover a project this week, the numbers agree (or the weekly report isn't imported yet for this week).")
             st.divider()
 
         st.subheader("3. Import")
@@ -276,11 +276,103 @@ with tab_lbl:
             st.success(st.session_state.pop("lbl_msg"))
 
 
+# ----------------------------------------------------------------- locations tab
+with tab_geo:
+    import geocode as gc
+    if not len(comm):
+        st.info("Database is empty - import a PDF first.")
+    else:
+        src = comm["geo_source"].fillna("None").astype(str)
+        osm = int(src.str.startswith(gc.OSM_PREFIX).sum())
+        man = int((src == gc.MANUAL_SOURCE).sum())
+        cc = int((src == gc.CITY_SOURCE).sum())
+        st.markdown("The weekly report has no street addresses, so every project starts at its **city center** "
+                    "(grey italic in the weekly tabs). The button below looks each one up by name on "
+                    "OpenStreetMap; anything you type in yourself is kept and never overwritten.")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Typed in (Manual)", man)
+        c2.metric("Found on OpenStreetMap", osm)
+        c3.metric("City center only", cc)
+
+        st.markdown("##### Find project locations online")
+        f1, f2 = st.columns([2, 1])
+        scope_mk = f1.selectbox("Market", ["All"] + sorted(comm["market"].dropna().unique()), key="geo_mk")
+        active_only = f2.checkbox("Skip sold-out projects", value=True)
+        todo = comm[src == gc.CITY_SOURCE]
+        if scope_mk != "All":
+            todo = todo[todo["market"] == scope_mk]
+        if active_only:
+            todo = todo[~todo["status"].astype(str).str.startswith("SOLD OUT")]
+        st.caption(f"{len(todo)} projects to look up - about {max(1, round(len(todo) * 2.3 / 60))} min "
+                   "(OpenStreetMap allows one lookup per second). Needs an internet connection.")
+        if st.button("Find locations", disabled=not len(todo)):
+            bar = st.progress(0.0)
+            found, failed = {}, 0
+            fails = 0
+            for k, r in enumerate(todo.itertuples()):
+                try:
+                    hit = gc.find_location(r.community, r.city)
+                    fails = 0
+                except ConnectionError as e:
+                    hit, fails = None, fails + 1
+                    if fails >= 3:
+                        st.error(f"{e}. Check the internet connection and try again; "
+                                 f"{len(found)} location(s) found so far are kept.")
+                        break
+                if hit:
+                    found[r.community_id] = hit
+                bar.progress((k + 1) / len(todo), text=f"{k + 1}/{len(todo)} - {r.community}")
+                if (k + 1) % 50 == 0 and found and db_path:      # save progress as it goes
+                    sdb.set_locations(st.session_state.db, found)
+                    sdb.save_db(st.session_state.db, db_path)
+            sdb.set_locations(st.session_state.db, found)
+            sdb.finalize(st.session_state.db)
+            st.session_state.out_bytes = db_bytes(st.session_state.db)
+            if db_path:
+                sdb.save_db(st.session_state.db, db_path)
+            st.session_state.geo_msg = (f"Found {len(found)} of {len(todo)} on OpenStreetMap; "
+                                        f"the rest stay at their city center.")
+            st.rerun()
+        if "geo_msg" in st.session_state:
+            st.success(st.session_state.pop("geo_msg"))
+
+        st.markdown("##### Check or type coordinates")
+        st.caption("Tip: in Google Maps, right-click the project and click the coordinates to copy them.")
+        q = st.text_input("Search community / builder / city", key="geo_q")
+        view = comm if not q else comm[comm["community"].str.contains(q, case=False, na=False) |
+                                       comm["builder"].astype(str).str.contains(q, case=False, na=False) |
+                                       comm["city"].astype(str).str.contains(q, case=False, na=False)]
+        view = view[["community_id", "community", "builder", "city", "latitude", "longitude", "geo_source"]] \
+            .assign(latitude=lambda d: pd.to_numeric(d["latitude"], errors="coerce"),
+                    longitude=lambda d: pd.to_numeric(d["longitude"], errors="coerce")).reset_index(drop=True)
+        ed = st.data_editor(view, hide_index=True, width="stretch", height=420, key=f"geo_ed_{q}",
+                            disabled=["community_id", "community", "builder", "city", "geo_source"],
+                            column_config={"community_id": None,
+                                           "latitude": st.column_config.NumberColumn("Latitude", format="%.8f"),
+                                           "longitude": st.column_config.NumberColumn("Longitude", format="%.8f"),
+                                           "geo_source": "Source"})
+        chg = {}
+        for a, b in zip(view.itertuples(), ed.itertuples()):
+            if not (sdb._same(sdb._f(a.latitude), sdb._f(b.latitude)) and sdb._same(sdb._f(a.longitude), sdb._f(b.longitude))):
+                chg[b.community_id] = (sdb._f(b.latitude), sdb._f(b.longitude), gc.MANUAL_SOURCE)
+        if st.button("Save coordinates", type="primary", disabled=not chg):
+            sdb.set_locations(st.session_state.db, chg)
+            st.session_state.out_bytes = db_bytes(st.session_state.db)
+            if db_path:
+                sdb.save_db(st.session_state.db, db_path)
+            st.session_state.geo_msg = f"Saved {len(chg)} location(s)."
+            st.rerun()
+        if len(comm):
+            pts = comm.assign(lat=pd.to_numeric(comm["latitude"], errors="coerce"),
+                              lon=pd.to_numeric(comm["longitude"], errors="coerce")).dropna(subset=["lat", "lon"])
+            st.map(pts[["lat", "lon"]], size=40)
+
+
 # ----------------------------------------------------------------- legacy tab
 with tab_legacy:
     st.markdown("Merge net-sales history from the old **New Home Sales Trends** workbook. "
                 "Safe to run again: it re-applies the v4 history (it won't duplicate communities, and your "
-                "labels and notes are kept). Re-run it once if communities you track outside Ryness "
+                "labels and notes are kept). Re-run it once if communities you track outside the weekly report "
                 "(e.g. Toll at Great Park) are missing v4 weeks.")
     lf = st.file_uploader("Old trends workbook (.xlsx)", type=["xlsx"], key="legacy")
     if lf is not None and st.button("Merge legacy history"):

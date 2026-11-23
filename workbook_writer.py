@@ -106,11 +106,11 @@ _SUMMARY = [("t4", "4 Wk\nTotal", 13), ("p4", "4 Wk\nPace", 13), ("t8", "8 Wk\nT
             ("p8", "8 Wk\nPace", 13), ("t13", "13 Wk\nTotal", 13), ("p13", "13 Wk\nPace", 13)]
 COLS = {
     "base": [("community", "Community", 32), ("builder", "Builder", 18), ("city", "City", 12.3),
-             ("type", "Type", 6), ("status", "Status", 13), ("first", "First Wk", 9),
+             ("lat", "Latitude", 12.5), ("lon", "Longitude", 13.5), ("type", "Type", 6), ("status", "Status", 13), ("first", "First Wk", 9),
              ("last", "Last Rpt", 13), ("units", "TotalUnits", 6), ("total", "Total Sold", 7)]
             + _SUMMARY,
     "net": [("community", "Community", 32), ("builder", "Builder", 18), ("city", "City", 12.3),
-            ("type", "Type", 6), ("status", "Status", 13), ("label", "Project Label", 29.4),
+            ("lat", "Latitude", 12.5), ("lon", "Longitude", 13.5), ("type", "Type", 6), ("status", "Status", 13), ("label", "Project Label", 29.4),
             ("pace", "Pace Label", 13), ("first", "First Wk", 9), ("last", "Last Rpt", 13),
             ("units", "TotalUnits", 6), ("total", "Total Sold", 7), ("loj", "LOJ Pace", 6)]
            + _SUMMARY,
@@ -133,16 +133,17 @@ def _write_view(ws, kind, layout, weeks, cell_lookup, latest):
     titles = {"gross": "Gross Sales (Wk's Sales)", "cans": "Cancellations (Wk's Cans)",
               "net": "Net Sales (Gross Sales - Cancellations)"}
     last_col = WK0 + len(weeks) - 1
-    ws["A1"] = f"SoCal New Home {titles[kind]} - The Ryness Report"
+    ws["A1"] = f"SoCal New Home {titles[kind]}"
     ws["A1"].font = F_TITLE
     ws["E1"] = f"Latest week ending: {latest:%m/%d/%Y}" if latest else ""
     ws["E1"].font = F_BOLD
-    legend = ("SOLD OUT = community no longer on the Ryness report (kept for history).  "
-              "Bold teal = from the Great Park Neighborhoods (GPN) report, which replaces Ryness for those projects.  "
+    legend = ("SOLD OUT = community no longer on the weekly report (kept for history).  "
+              "Bold teal = from the Great Park Neighborhoods (GPN) report, which replaces the weekly report for those projects.  "
+              "Latitude/Longitude in grey italic = city center (approximate); black = OpenStreetMap or typed in.  "
               "N/R = listed on the report but didn't report that week (Traffic N/A) - left out of totals and pace.  "
               "Status colors: green NEW, blue ADDED (first week tracked), yellow RETURNED, "
-              "red DROPPED this week, grey SOLD OUT, orange S/O or TSO per Ryness, purple MANUAL "
-              "(not on Ryness - blue numbers come from the Manual_Entries tab).")
+              "red DROPPED this week, grey SOLD OUT, orange S/O or TSO per report, purple MANUAL "
+              "(not on the weekly report - blue numbers come from the Manual_Entries tab).")
     if kind == "net":
         legend = ("Net = 'Gross Sales' - 'Cancellations' (live formulas).  Grey italic = legacy "
                   "net-only history from New Home Sales Trends v4.  Project Label is yours to edit "
@@ -223,7 +224,7 @@ def _write_view(ws, kind, layout, weeks, cell_lookup, latest):
                     "type": cr.product_type, "status": cr.status,
                     "label": getattr(cr, "project_label", None),
                     "first": cr.first_week, "last": cr.last_reported,
-                    "units": cr.units}
+                    "units": cr.units, "lat": cr.latitude, "lon": cr.longitude}
             for key, v in vals.items():
                 if key not in C:
                     continue
@@ -237,6 +238,11 @@ def _write_view(ws, kind, layout, weeks, cell_lookup, latest):
                     c.alignment = CENTER
                 if key in ("type", "units"):
                     c.alignment = CENTER
+                if key in ("lat", "lon") and v is not None:
+                    c.value = float(v)
+                    c.number_format = "0.00000000"
+                    if str(getattr(cr, "geo_source", "")).startswith("City center"):
+                        c.font = F_LEGACY          # grey italic = approximate (city center)
             sf = _status_fill(cr.status)
             if sf:
                 ws.cell(r, 1).fill = sf
@@ -249,9 +255,9 @@ def _write_view(ws, kind, layout, weeks, cell_lookup, latest):
                 src, txt = rec["source"], rec["legacy_text"]
                 if src == "Not on report" or (isinstance(txt, str) and txt.upper() == "SOLD OUT"):
                     c.value, c.font, c.fill = "SOLD OUT", F_SO, FILL_SO
-                elif src == "Ryness PDF" and txt == "N/R":
+                elif src == "Weekly report" and txt == "N/R":
                     c.value, c.font = "N/R", F_SO          # listed, didn't report: excluded from pace
-                elif src in ("Ryness PDF", "Manual entry", "GPN report"):
+                elif src in ("Weekly report", "Manual entry", "GPN report"):
                     if kind == "gross":
                         c.value = int(rec["gross_sales"])
                     elif kind == "cans":
@@ -312,7 +318,7 @@ def _write_view(ws, kind, layout, weeks, cell_lookup, latest):
                 mkt_rows.append(r)
             r += 2
     # Freeze headers + Community/Builder/City (as in the 11/13 workbook)
-    ws.freeze_panes = ws.cell(DATA0, C["type"])
+    ws.freeze_panes = ws.cell(DATA0, C["lat"])
     ws.sheet_view.zoomScale = 90
     ws.sheet_properties.outlinePr.summaryBelow = False
 
@@ -354,12 +360,12 @@ def write_workbook(db, path, header_map):
     weekly = db["weekly"].copy()
     weekly["week_ending"] = pd.to_datetime(weekly["week_ending"]).dt.date
     weeks = _week_list(weekly)
-    pdf_weeks = weekly.loc[weekly["source"] == "Ryness PDF", "week_ending"]
+    pdf_weeks = weekly.loc[weekly["source"] == "Weekly report", "week_ending"]
     latest = max(pdf_weeks) if len(pdf_weeks) else (weeks[-1] if weeks else None)
     for col in ("first_week", "last_reported"):
         comm[col] = pd.to_datetime(comm[col], errors="coerce").dt.date
     lookup = {(r["community_id"], r["week_ending"]): r for r in weekly.to_dict("records")
-              if r["source"] != "Ryness PDF (superseded by GPN)"}
+              if r["source"] != "Weekly report (superseded by GPN)"}
     layout = _layout(comm)
 
     wb = Workbook()
@@ -393,11 +399,13 @@ def write_workbook(db, path, header_map):
     ws["A1"] = "Communities - master list (never deleted; sold-out projects stay for history)"
     ws["A1"].font = F_TITLE
     ws["A2"] = ("Yellow columns (Project Label, Total Lots, Grand Opening, Tracking, My Notes) are yours to edit and are "
-                "preserved on every import. Tracking: Ryness (default) or Manual (not on the report - "
+                "preserved on every import. Tracking: Weekly report (default) or Manual (not on the report - "
                 "never flagged sold out; enter weeks in Manual_Entries). Other columns refresh from the latest PDF.")
     ws["A2"].font = F_NOTE
     cdf = comm.copy()
     cdf["project_label_saved"] = cdf["project_label"]
+    cdf["geo_saved"] = [f"{float(a):.8f},{float(b):.8f}" if pd.notna(a) and pd.notna(b) else None
+                        for a, b in zip(cdf["latitude"], cdf["longitude"])]
     for col in ("grand_opening", "last_pdf_week"):
         cdf[col] = pd.to_datetime(cdf[col], errors="coerce").dt.date
     cdf["_lay"] = cdf["community_id"].map(
@@ -408,13 +416,18 @@ def write_workbook(db, path, header_map):
                          "submarket": 22, "status": 18, "user_notes": 30, "legacy_name": 26,
                          "project_label": 32},
                  date_cols=("grand_opening", "first_week", "last_reported", "last_pdf_week"),
-                 input_cols=("project_label", "total_lots", "grand_opening", "tracking", "user_notes"))
+                 input_cols=("project_label", "latitude", "longitude", "total_lots", "grand_opening",
+                             "tracking", "user_notes"))
+    for colname in ("latitude", "longitude"):
+        idx = list(cdf.columns).index(colname) + 1
+        for r in range(4, ws.max_row + 1):
+            ws.cell(r, idx).number_format = "0.00000000"
     st_col = list(cdf.columns).index("status") + 1
     for r in range(4, ws.max_row + 1):
         f = _status_fill(ws.cell(r, st_col).value)
         if f:
             ws.cell(r, st_col).fill = f
-    for colname in ("m_ord", "s_ord", "r_ord", "project_label_saved"):
+    for colname in ("m_ord", "s_ord", "r_ord", "project_label_saved", "geo_saved"):
         idx = list(cdf.columns).index(colname) + 1
         ws.column_dimensions[L(idx)].hidden = True
 
@@ -422,7 +435,7 @@ def write_workbook(db, path, header_map):
     ws = wb.create_sheet("Name_Map")
     ws["A1"] = "Name_Map - tell the tool that a differently-spelled name is an existing community"
     ws["A1"].font = F_TITLE
-    ws["A2"] = ("Add a row when Ryness renames a project (see POSSIBLE RENAME in Change_Log). "
+    ws["A2"] = ("Add a row when the report renames a project (see POSSIBLE RENAME in Change_Log). "
                 "Alias = name exactly as printed in the PDF; Market = LA-Orange-North / Inland Empire / "
                 "San Diego-Imperial; Community ID = from the Communities tab. Re-import the PDF afterwards.")
     ws["A2"].font = F_NOTE
@@ -432,7 +445,7 @@ def write_workbook(db, path, header_map):
 
     # Manual entries (input)
     ws = wb.create_sheet("Manual_Entries")
-    ws["A1"] = "Manual_Entries - weekly numbers for communities not on the Ryness report"
+    ws["A1"] = "Manual_Entries - weekly numbers for communities not on the weekly report"
     ws["A1"].font = F_TITLE
     ws["A2"] = ("For communities with Tracking = Manual (e.g. Toll Brothers). Week Ending = the Sunday of "
                 "the report week; Community ID from the Communities tab. Saved here, merged on every import.")
@@ -478,10 +491,10 @@ def write_workbook(db, path, header_map):
     # Read me
     ws = wb.create_sheet("Read Me")
     lines = [
-        ("SoCal New Home Sales Tracker - Ryness weekly import", F_TITLE),
+        ("SoCal New Home Sales Tracker - weekly import", F_TITLE),
         ("", F_BASE),
         ("How it works", F_BOLD),
-        ("1. Each week, open the Ryness Import app, upload this workbook and the new Ryness PDF, review, and click Import.", F_BASE),
+        ("1. Each week, open the New Home Sales Weekly Import app, upload this workbook and the new weekly report PDF, review, and click Import.", F_BASE),
         ("2. The tool reads every community's Wk's Sales (Gross) and Wk's Cans (Cancellations); Net Sales = Gross - Cancellations.", F_BASE),
         ("3. Every section is checked against the PDF's own TOTALS row; results are in Import_Log.", F_BASE),
         ("4. Communities are never deleted. One that disappears from the report is flagged DROPPED, then shows SOLD OUT going forward.", F_BASE),
@@ -493,8 +506,9 @@ def write_workbook(db, path, header_map):
         ("Change_Log - NEW, ADDED, DROPPED, RETURNED, FLAG S/O, FLAG TSO and POSSIBLE RENAME events by week.", F_BASE),
         ("Communities - master list with status. Yellow columns are yours to edit and are kept on every import.", F_BASE),
         ("Name_Map - aliases for renamed projects, and for GPN names that don't match automatically (alias exactly as GPN prints it, e.g. 'KB, Moonlight').", F_BASE),
-        ("GPN report - Great Park Neighborhoods numbers replace Ryness for the same project and week; shown in bold teal.", F_BASE),
-        ("Manual_Entries - weekly gross/cans for communities you track outside Ryness (Tracking = Manual).", F_BASE),
+        ("GPN report - Great Park Neighborhoods numbers replace the weekly report for the same project and week; shown in bold teal.", F_BASE),
+        ("Latitude / Longitude - city center (grey italic) until found on OpenStreetMap (app's Locations tab) or typed in; typed values are kept. Geo Source in Communities says which.", F_BASE),
+        ("Manual_Entries - weekly gross/cans for communities you track outside the weekly report (Tracking = Manual).", F_BASE),
         ("Weekly_Data - one row per community per week (the table to load into an online database later).", F_BASE),
         ("Import_Log - one row per import with totals and warnings.", F_BASE),
         ("Legacy_Match / Legacy_Check - how v4 history was matched, and v4 vs PDF for overlapping weeks.", F_BASE),

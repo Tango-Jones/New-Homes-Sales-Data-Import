@@ -1,6 +1,6 @@
 """One-time: build the starting database from the first PDF + v4 history."""
 import sys, time
-from ryness_parser import parse_pdf
+from weekly_report_parser import parse_pdf
 import sales_db as sdb
 pdf, legacy, out = sys.argv[1:4]
 t=time.time()
