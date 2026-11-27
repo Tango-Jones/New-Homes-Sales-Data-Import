@@ -52,12 +52,13 @@ def style_events(df):
 # ----------------------------------------------------------------- sidebar: database
 st.sidebar.header("1. Database workbook")
 mode = st.sidebar.radio("Where is the database?", ["File on this computer", "Upload a copy"],
-                        index=1 if ON_CLOUD else 0,
+                        # online, default to an uploaded copy - unless a workbook ships alongside the app
+                        index=1 if (ON_CLOUD and not Path(DEFAULT_DB).exists()) else 0,
                         help="'File on this computer' reads and saves the workbook in place. "
                              "Online (Streamlit Cloud), use 'Upload a copy' and download the result.")
 if ON_CLOUD and mode == "File on this computer":
-    st.sidebar.warning("This app is running online: files saved here are wiped when the app restarts. "
-                       "Use 'Upload a copy' and download the workbook when you're done.")
+    st.sidebar.warning("This app is running online: changes saved here are wiped when the app restarts. "
+                       "Always click Download workbook when you're done.")
 if mode == "File on this computer":
     db_path = st.sidebar.text_input("Workbook path", DEFAULT_DB)
     if st.sidebar.button("Load / reload", width="stretch") or "db" not in st.session_state:
@@ -86,7 +87,9 @@ comm, weekly = db["communities"], db["weekly"]
 pdf_weeks = sorted(set(weekly.loc[weekly["source"].isin(sdb.PDF_SOURCES), "week_ending"]))
 st.sidebar.metric("Communities tracked", len(comm))
 st.sidebar.caption(f"Weekly reports imported: {len(pdf_weeks)}"
-                   + (f" (latest {pdf_weeks[-1]:%m/%d/%Y})" if pdf_weeks else ""))
+                   + (f" ({pdf_weeks[0]:%m/%d/%Y} to {pdf_weeks[-1]:%m/%d/%Y})" if pdf_weeks else ""))
+if not len(comm):
+    st.sidebar.info("No workbook loaded yet.")
 
 def _clear_dirty():
     st.session_state.dirty = False
@@ -220,7 +223,14 @@ with tab_imp:
             st.divider()
 
         st.subheader("3. Import")
-        if st.button("Import into database", type="primary", width="stretch", disabled=not (parsed or gpn_parsed)):
+        start_new = True
+        if not len(db["communities"]):
+            st.error("**No database workbook is loaded.** Importing now starts a NEW database that contains only "
+                     "these reports - your existing weeks would not be in it. Load your workbook in the sidebar "
+                     "first (Upload a copy), then import.")
+            start_new = st.checkbox("I want to start a new, empty database with only these reports")
+        if st.button("Import into database", type="primary", width="stretch",
+                     disabled=not (parsed or gpn_parsed) or not start_new):
             st.session_state.db = preview
             st.session_state.dirty = True
             if db_path:
